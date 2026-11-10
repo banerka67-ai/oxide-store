@@ -1,0 +1,16 @@
+ПУБЛИКАЦИЯ OXIDE STORE НА RENDER
+
+1. Создай репозиторий на GitHub с именем oxide-store.
+2. Загрузи ВНУТРЕННОЕ СОДЕРЖИМОЕ этой папки WEBSITE в корень репозитория (app.py, requirements.txt, templates, static, render.yaml).
+3. На Render выбери New -> Web Service и подключи этот GitHub-репозиторий.
+4. Render должен определить настройки из render.yaml. Если попросит вручную:
+   Build Command: pip install -r requirements.txt
+   Start Command: gunicorn app:app
+5. В Environment добавь ADMIN_PASSWORD со своим длинным паролем.
+6. Нажми Deploy. После успешного запуска Render покажет публичный адрес.
+
+ВАЖНО:
+- SECRET_KEY генерируется через render.yaml.
+- SQLite здесь подходит для демонстрационного запуска. На бесплатном хостинге данные на локальном диске могут пропасть при пересоздании сервиса. Перед реальными продажами подключи постоянное хранилище/базу данных.
+- Не загружай .env и не публикуй пароли или токены в GitHub.
+- Бесплатный Render может усыплять сервис после периода бездействия.
