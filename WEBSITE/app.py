@@ -88,7 +88,7 @@ def telegram_webhook():
         payload = str(successful.get('invoice_payload', ''))
         with db() as c:
             payment = c.execute('SELECT order_ids,total_stars,status,telegram_user_id FROM star_payments WHERE payload=?', (payload,)).fetchone()
-            if payment and payment['status'] == 'pending' and successful.get('currency') == 'XTR' and int(successful.get('total_amount', 0)) == int(payment['total_stars']):
+            if payment and payment['status'] == 'pending' and successful.get('currency') == 'XTR' and int(successful.get('total_amount', 0)) == int(payment['total_stars']) and int((message.get('from') or {}).get('id', 0)) == int(payment['telegram_user_id']):
                 for oid in json.loads(payment['order_ids']):
                     c.execute("UPDATE orders SET status='Оплачен' WHERE id=?", (int(oid),))
                 c.execute("UPDATE star_payments SET status='paid' WHERE payload=?", (payload,))
@@ -311,7 +311,7 @@ def toggle_product(pid):
 @admin_required
 def update_order(oid):
     status=request.form.get('status','Новый')
-    if status not in ['Новый','В обработке','Выполнен','Отменён']: abort(400)
+    if status not in ['Ожидает оплаты','Оплачен','Новый','В обработке','Выполнен','Отменён']: abort(400)
     with db() as c: c.execute('UPDATE orders SET status=? WHERE id=?',(status,oid))
     return redirect(url_for('admin'))
 
