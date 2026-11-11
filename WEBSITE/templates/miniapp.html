@@ -152,14 +152,26 @@ function copyRubDetails() {
     document.getElementById('checkoutMessage').textContent = value;
   });
 }
-function rubTransferred() {
+async function rubTransferred() {
   const p = window.currentRublePayment;
   if (!p) return;
-  document.getElementById('checkoutMessage').textContent = 'Заказ ' + p.payment_ref + ' ожидает проверки продавцом. Не закрывай это окно до сохранения номера заказа.';
-  document.getElementById('rubPayment').hidden = true;
-  cart.clear();
-  document.getElementById('badge').textContent = '';
-  renderCart();
+  const message = document.getElementById('checkoutMessage');
+  try {
+    const response = await fetch('/api/ruble-payment-reported', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json','X-Telegram-Init-Data':Telegram.WebApp.initData},
+      body: JSON.stringify({payment_ref:p.payment_ref})
+    });
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || 'Не удалось сообщить об оплате.');
+    message.textContent = 'Сообщение об оплате отправлено. Заказ ' + p.payment_ref + ' ожидает проверки поступления денег продавцом.';
+    document.getElementById('rubPayment').hidden = true;
+    cart.clear();
+    document.getElementById('badge').textContent = '';
+    renderCart();
+  } catch (error) {
+    message.textContent = error.message || 'Ошибка соединения. Попробуй ещё раз.';
+  }
 }
 syncFavorites();
 </script></body></html>
