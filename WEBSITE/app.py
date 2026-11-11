@@ -106,6 +106,42 @@ def miniapp_admin():
         orders=c.execute("""SELECT o.*,p.name product_name FROM orders o LEFT JOIN products p ON p.id=o.product_id ORDER BY o.id DESC""").fetchall()
     return render_template('miniapp_admin.html', products=products, orders=orders)
 
+
+@app.route('/api/order', methods=['POST'])
+def create_miniapp_order():
+    data = request.get_json(silent=True) or {}
+    customer = str(data.get('customer', '')).strip()[:80]
+    contact = str(data.get('contact', '')).strip()[:120]
+    items = data.get('items')
+    if not customer or not contact:
+        return {'ok': False, 'error': 'Укажи имя и контакт.'}, 400
+    if not isinstance(items, list) or not items or len(items) > 30:
+        return {'ok': False, 'error': 'Корзина пуста или содержит слишком много позиций.'}, 400
+    clean = {}
+    for item in items:
+        if not isinstance(item, dict):
+            return {'ok': False, 'error': 'Некорректная корзина.'}, 400
+        try:
+            pid, qty = int(item.get('id')), int(item.get('qty'))
+        except (TypeError, ValueError):
+            return {'ok': False, 'error': 'Некорректное количество товара.'}, 400
+        if pid <= 0 or qty < 1 or qty > 99:
+            return {'ok': False, 'error': 'Количество должно быть от 1 до 99.'}, 400
+        clean[pid] = min(99, clean.get(pid, 0) + qty)
+    order_ids, total = [], 0.0
+    with db() as c:
+        for pid, qty in clean.items():
+            product = c.execute('SELECT id, price FROM products WHERE id=? AND active=1', (pid,)).fetchone()
+            if not product:
+                return {'ok': False, 'error': 'Один из товаров больше недоступен. Обнови каталог.'}, 400
+            amount = round(float(product['price']) * qty, 2)
+            cur = c.execute('INSERT INTO orders(customer,contact,product_id,quantity,total) VALUES(?,?,?,?,?)',
+                            (customer, contact, pid, qty, amount))
+            order_ids.append(cur.lastrowid)
+            total += amount
+    return {'ok': True, 'order_ids': order_ids, 'total': round(total, 2),
+            'message': 'Заявка отправлена! Администратор свяжется с тобой для подтверждения.'}
+
 @app.route('/order/<int:pid>', methods=['POST'])
 def order(pid):
     customer=request.form.get('customer','').strip(); contact=request.form.get('contact','').strip()
