@@ -105,7 +105,8 @@ async function checkout() {
   const contact = document.getElementById('contact').value.trim();
   const message = document.getElementById('checkoutMessage');
   const button = document.getElementById('checkoutBtn');
-  if (!cart.size) { message.textContent = 'Сначала добавь товары в корзину.'; return; }\n  const physicalItems = [...cart.values()].filter(x => x.physical).length;\n  if (physicalItems && physicalItems !== cart.size) { message.textContent = 'Раздели физические и цифровые товары на разные заказы.'; return; }
+  if (!cart.size) { message.textContent = 'Сначала добавь товары в корзину.'; return; }
+  const physicalItems = [...cart.values()].filter(x => x.physical).length;\n  if (physicalItems && physicalItems !== cart.size) { message.textContent = 'Раздели физические и цифровые товары на разные заказы.'; return; }
   if (!customer || !contact) { message.textContent = 'Заполни имя и контакт.'; return; }
   button.disabled = true; button.textContent = 'ОТПРАВЛЯЕМ...'; message.textContent = '';
   try {
@@ -115,7 +116,9 @@ async function checkout() {
       body:JSON.stringify({customer,contact,items:[...cart.entries()].map(([id,item])=>({id,qty:item.qty}))})});
     const result = await response.json();
     if (!response.ok || !result.ok) throw new Error(result.error || 'Не удалось создать счёт.');
-    if (rubleMode) {\n      document.getElementById('rubPayment').hidden = false;\n      window.currentRublePayment = result;\n      document.getElementById('rubDetails').textContent = 'Заказ ' + result.payment_ref + ' · Сумма: ' + result.total + ' ₽ · ' + result.bank_name + ' · Получатель: ' + result.recipient + ' · Реквизиты: ' + result.account_details;\n      message.textContent = result.message;\n      return;\n    }\n    if (typeof Telegram.WebApp.openInvoice !== 'function') throw new Error('Обнови Telegram до актуальной версии.');
+    if (rubleMode) {
+      document.getElementById('rubPayment').hidden = false;\n      window.currentRublePayment = result;
+      document.getElementById('rubDetails').textContent = 'Заказ ' + result.payment_ref + ' · Сумма: ' + result.total + ' ₽ · ' + result.bank_name + ' · Получатель: ' + result.recipient + ' · Реквизиты: ' + result.account_details;\n      message.textContent = result.message;\n      return;\n    }\n    if (typeof Telegram.WebApp.openInvoice !== 'function') throw new Error('Обнови Telegram до актуальной версии.');
     message.textContent = 'Счёт создан на ' + result.total_stars + ' ⭐. Ожидаем оплату...';
     Telegram.WebApp.openInvoice(result.invoice_url, status => {
       if (status === 'paid') {
