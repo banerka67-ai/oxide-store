@@ -75,8 +75,8 @@ def telegram_webhook():
     if pre:
         payload = str(pre.get('invoice_payload', ''))
         with db() as c:
-            payment = c.execute('SELECT total_stars,status FROM star_payments WHERE payload=?', (payload,)).fetchone()
-        valid = bool(payment and payment['status'] == 'pending' and pre.get('currency') == 'XTR' and int(pre.get('total_amount', 0)) == int(payment['total_stars']))
+            payment = c.execute('SELECT total_stars,status,telegram_user_id FROM star_payments WHERE payload=?', (payload,)).fetchone()
+        valid = bool(payment and payment['status'] == 'pending' and pre.get('currency') == 'XTR' and int(pre.get('total_amount', 0)) == int(payment['total_stars']) and int((pre.get('from') or {}).get('id', 0)) == int(payment['telegram_user_id']))
         try:
             telegram_api('answerPreCheckoutQuery', {'pre_checkout_query_id': pre.get('id'), 'ok': valid, **({} if valid else {'error_message': 'Счёт недействителен. Создай новый заказ.'})})
         except Exception:
@@ -87,7 +87,7 @@ def telegram_webhook():
     if successful:
         payload = str(successful.get('invoice_payload', ''))
         with db() as c:
-            payment = c.execute('SELECT order_ids,total_stars,status FROM star_payments WHERE payload=?', (payload,)).fetchone()
+            payment = c.execute('SELECT order_ids,total_stars,status,telegram_user_id FROM star_payments WHERE payload=?', (payload,)).fetchone()
             if payment and payment['status'] == 'pending' and successful.get('currency') == 'XTR' and int(successful.get('total_amount', 0)) == int(payment['total_stars']):
                 for oid in json.loads(payment['order_ids']):
                     c.execute("UPDATE orders SET status='Оплачен' WHERE id=?", (int(oid),))
@@ -284,6 +284,22 @@ def add_product():
         with db() as c: c.execute('INSERT INTO products(name,price,description,stars_price) VALUES(?,?,?,?)',(name,price,desc,stars_price))
         flash('Товар добавлен.')
     return redirect(url_for('admin'))
+
+
+@app.route('/admin/product/<int:pid>/stars', methods=['POST'])
+@admin_required
+def update_product_stars(pid):
+    try:
+        stars_price = int(request.form.get('stars_price', '0'))
+    except ValueError:
+        stars_price = 0
+    if stars_price < 1 or stars_price > 1000000:
+        flash('Цена в Stars должна быть целым числом от 1 до 1 000 000.')
+    else:
+        with db() as c:
+            c.execute('UPDATE products SET stars_price=? WHERE id=?', (stars_price, pid))
+        flash('Цена в Stars обновлена.')
+    return redirect(url_for('miniapp_admin'))
 
 @app.route('/admin/product/<int:pid>/toggle',methods=['POST'])
 @admin_required
