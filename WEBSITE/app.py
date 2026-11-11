@@ -157,7 +157,7 @@ def miniapp():
 def miniapp_admin():
     with db() as c:
         products=c.execute('SELECT * FROM products ORDER BY id DESC').fetchall()
-        orders=c.execute("""SELECT o.*,p.name product_name FROM orders o LEFT JOIN products p ON p.id=o.product_id ORDER BY o.id DESC""").fetchall()
+        orders=c.execute("""SELECT o.*,p.name product_name,p.physical product_physical FROM orders o LEFT JOIN products p ON p.id=o.product_id ORDER BY o.id DESC""").fetchall()
         stock_rows=c.execute('SELECT product_id,COUNT(*) AS stock FROM product_keys WHERE claimed_order_id IS NULL GROUP BY product_id').fetchall()
         stock={row['product_id']:row['stock'] for row in stock_rows}
         ruble_payments=c.execute('SELECT * FROM ruble_payments ORDER BY id DESC').fetchall()
