@@ -1,5 +1,7 @@
 import os, sqlite3, json, hashlib, hmac, secrets, urllib.request, urllib.error
 from pathlib import Path
+from werkzeug.utils import secure_filename
+import uuid
 from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, session, flash, abort
 from dotenv import load_dotenv
@@ -15,6 +17,27 @@ ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'change-me')
 BOT_TOKEN = os.getenv('BOT_TOKEN', '').strip()
 PUBLIC_URL = os.getenv('PUBLIC_URL', 'https://oxide-store.onrender.com').rstrip('/')
 WEBHOOK_SECRET = hashlib.sha256(app.secret_key.encode()).hexdigest()
+UPLOAD_DIR = HERE / 'static' / 'uploads'
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+ALLOWED_IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.webp', '.gif'}
+MAX_IMAGE_SIZE = 5 * 1024 * 1024
+
+
+def save_product_image(file):
+    if not file or not file.filename:
+        return ''
+    original = secure_filename(file.filename)
+    ext = Path(original).suffix.lower()
+    if ext not in ALLOWED_IMAGE_EXTENSIONS:
+        raise ValueError('Формат фото: PNG, JPG, WEBP или GIF.')
+    data = file.read(MAX_IMAGE_SIZE + 1)
+    if not data or len(data) > MAX_IMAGE_SIZE:
+        raise ValueError('Фото должно быть не больше 5 МБ.')
+    if not file.mimetype.startswith('image/'):
+        raise ValueError('Можно загружать только изображения.')
+    filename = f'{uuid.uuid4().hex}{ext}'
+    (UPLOAD_DIR / filename).write_bytes(data)
+    return f'/static/uploads/{filename}'
 
 def telegram_api(method, payload):
     if not BOT_TOKEN:
@@ -279,17 +302,25 @@ def admin():
 @app.route('/admin/product',methods=['POST'])
 @admin_required
 def add_product():
-    name=request.form.get('name','').strip(); desc=request.form.get('description','').strip(); image_url=request.form.get('image_url','').strip()
+    name=request.form.get('name','').strip(); desc=request.form.get('description','').strip()
+    image_url=request.form.get('image_url','').strip()
     try: price=float(request.form.get('price','0').replace(',','.'))
     except ValueError: price=0
-    if not name or price<=0: flash('Укажите название и цену больше нуля.')
-    elif image_url and not image_url.startswith(('https://','http://')): flash('Ссылка на картинку должна начинаться с https:// или http://.')
+    if not name or price<=0:
+        flash('Укажите название и цену больше нуля.')
+    elif image_url and not image_url.startswith(('https://','http://')):
+        flash('Ссылка на картинку должна начинаться с https:// или http://.')
     else:
-        try: stars_price = max(0, int(request.form.get('stars_price', '0') or 0))
-        except ValueError: stars_price = 0
-        with db() as c: c.execute('INSERT INTO products(name,price,description,stars_price,image_url) VALUES(?,?,?,?,?)',(name,price,desc,stars_price,image_url))
-        flash('Товар добавлен.')
-    return redirect(url_for('admin'))
+        try:
+            stars_price = max(0, int(request.form.get('stars_price', '0') or 0))
+            uploaded = save_product_image(request.files.get('image_file'))
+            if uploaded: image_url = uploaded
+            with db() as c:
+                c.execute('INSERT INTO products(name,price,description,stars_price,image_url) VALUES(?,?,?,?,?)',(name,price,desc,stars_price,image_url))
+            flash('Товар добавлен.')
+        except ValueError as exc:
+            flash(str(exc))
+    return redirect(url_for('miniapp_admin'))
 
 
 @app.route('/admin/product/<int:pid>/image', methods=['POST'])
