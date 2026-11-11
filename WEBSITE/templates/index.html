@@ -1,1 +1,37 @@
-{% extends 'base.html' %}{% block content %}<section class="hero"><p class="eyebrow">DIGITAL GOODS / ONLINE STORE</p><h1>ТВОЙ МАГАЗИН<br><span>БЕЗ ЛИШНЕГО.</span></h1><p class="muted">Выбирай товар и оставляй заявку. Администратор подтвердит заказ вручную.</p></section><h2>КАТАЛОГ</h2><section class="products">{% for p in products %}<article class="product"><div class="tag">DIGITAL ITEM</div><h3>{{p.name}}</h3><p>{{p.description}}</p><div class="price">{{'%.2f'|format(p.price)}} ₽</div><form action="{{url_for('order',pid=p.id)}}" method="post"><input name="customer" placeholder="Ваше имя" required><input name="contact" placeholder="Telegram @username или контакт" required><button>ОСТАВИТЬ ЗАЯВКУ</button></form></article>{% else %}<p class="muted">Пока нет товаров. Добавьте их через админ-панель.</p>{% endfor %}</section>{% endblock %}
+{% extends 'base.html' %}
+{% block content %}
+<section class="hero">
+  <div class="hero-shade"></div>
+  <div class="hero-content">
+    <p class="eyebrow"><span class="eyebrow-dot"></span> OXIDE WORLD · DIGITAL STORE</p>
+    <h1>ТВОЙ МИР.<br><span>ТВОИ ПРАВИЛА.</span></h1>
+    <p class="hero-copy">Всё необходимое для твоего следующего приключения. Выбирай товары в каталоге и оформляй заказ в пару кликов.</p>
+    <a class="primary-button" href="#catalog">СМОТРЕТЬ КАТАЛОГ <span>↗</span></a>
+    <div class="hero-meta"><span><i></i> МАГАЗИН ОНЛАЙН</span><span>OXIDE STORE / 001</span></div>
+  </div>
+  <div class="hero-corner">SURVIVE<br>THE WASTELAND</div>
+</section>
+
+<section class="intro-strip">
+  <div><span class="strip-number">01</span><span><b>ВЫБИРАЙ</b><small>Найди нужный товар</small></span></div>
+  <div><span class="strip-number">02</span><span><b>ОФОРМЛЯЙ</b><small>Оставь заявку на сайте</small></span></div>
+  <div><span class="strip-number">03</span><span><b>ПОЛУЧАЙ</b><small>Подтверди детали заказа</small></span></div>
+</section>
+
+<section class="catalog-section" id="catalog">
+  <div class="section-heading"><div><p class="eyebrow">МАГАЗИН / АССОРТИМЕНТ</p><h2>КАТАЛОГ <span>ТОВАРОВ</span></h2></div><span class="catalog-count">{{ products|length }} ПОЗИЦИЙ</span></div>
+  <section class="products">
+    {% for p in products %}
+    <article class="product">
+      <div class="product-art"><span class="product-art-label">OXIDE / ITEM {{ '%03d'|format(loop.index) }}</span><span class="product-art-symbol">O</span><span class="product-art-bottom">DIGITAL GOODS</span></div>
+      <div class="product-info"><div class="product-category">ЦИФРОВОЙ ТОВАР</div><h3>{{p.name}}</h3><p class="product-description">{{p.description}}</p><div class="product-buy"><strong>{{'%.2f'|format(p.price)}} <small>₽</small></strong><a class="buy-link" href="#order-{{p.id}}">КУПИТЬ <span>↗</span></a></div>
+      <form class="order-form" id="order-{{p.id}}" action="{{url_for('order',pid=p.id)}}" method="post"><label>Оформление заявки</label><input name="customer" placeholder="Ваше имя" required><input name="contact" placeholder="Telegram @username или контакт" required><button type="submit">ОСТАВИТЬ ЗАЯВКУ <span>→</span></button></form></div>
+    </article>
+    {% else %}
+    <div class="empty-state"><div class="empty-icon">▧</div><h3>СКОРО ЗДЕСЬ ПОЯВЯТСЯ ТОВАРЫ</h3><p>Каталог пока пуст. Загляни сюда немного позже.</p></div>
+    {% endfor %}
+  </section>
+</section>
+
+<section class="order-info" id="how-to-order"><div><p class="eyebrow">ПРОСТО И ПОНЯТНО</p><h2>КАК СДЕЛАТЬ<br><span>ЗАКАЗ?</span></h2></div><p>Выбери товар, укажи имя и удобный контакт. Заявка поступит администратору — он свяжется с тобой, чтобы подтвердить детали.</p><a class="outline-button" href="#catalog">ПЕРЕЙТИ К ТОВАРАМ ↗</a></section>
+{% endblock %}
