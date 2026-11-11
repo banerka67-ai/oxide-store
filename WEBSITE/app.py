@@ -249,6 +249,7 @@ def create_rub_order():
         clean[pid] = min(99, clean.get(pid, 0) + qty)
     order_ids, total_cents = [], 0
     with db() as c:
+        validated = []
         for pid, qty in clean.items():
             product = c.execute('SELECT id,price,physical FROM products WHERE id=? AND active=1', (pid,)).fetchone()
             if not product:
@@ -258,18 +259,37 @@ def create_rub_order():
             cents = int(round(float(product['price']) * 100)) * qty
             if cents <= 0:
                 return {'ok': False, 'error': 'Некорректная цена товара.'}, 400
+            validated.append((pid, qty, cents))
+        total_cents = sum(x[2] for x in validated)
+        if not validated or total_cents > 100000000:
+            return {'ok': False, 'error': 'Слишком большая сумма заказа.'}, 400
+        for pid, qty, cents in validated:
             cur = c.execute("INSERT INTO orders(customer,contact,product_id,quantity,total,status) VALUES(?,?,?,?,?,'Ожидает оплаты')",
                             (customer, contact, pid, qty, cents / 100))
             order_ids.append(cur.lastrowid)
-            total_cents += cents
-        if not order_ids or total_cents > 100000000:
-            return {'ok': False, 'error': 'Слишком большая сумма заказа.'}, 400
         payment_ref = 'CS-' + secrets.token_hex(5).upper()
         c.execute('INSERT INTO ruble_payments(payment_ref,order_ids,total_cents,telegram_user_id) VALUES(?,?,?,?)',
                   (payment_ref, json.dumps(order_ids), total_cents, telegram_user_id))
     return {'ok': True, 'payment_ref': payment_ref, 'total': f'{total_cents / 100:.2f}',
             'bank_name': bank_name, 'recipient': recipient, 'account_details': details,
             'message': 'Переведи точную сумму и дождись подтверждения продавца.'}
+
+
+@app.route('/api/ruble-payment-reported', methods=['POST'])
+def report_ruble_payment():
+    telegram_user_id = verify_telegram_init_data(request.headers.get('X-Telegram-Init-Data', ''))
+    if not telegram_user_id:
+        return {'ok': False, 'error': 'Открой магазин через Telegram.'}, 401
+    data = request.get_json(silent=True) or {}
+    payment_ref = str(data.get('payment_ref', '')).strip()[:32]
+    with db() as c:
+        payment = c.execute('SELECT id,status FROM ruble_payments WHERE payment_ref=? AND telegram_user_id=?',
+                            (payment_ref, telegram_user_id)).fetchone()
+        if not payment:
+            return {'ok': False, 'error': 'Заказ не найден.'}, 404
+        if payment['status'] == 'Ожидает оплаты':
+            c.execute("UPDATE ruble_payments SET status='Покупатель сообщил об оплате' WHERE id=?", (payment['id'],))
+    return {'ok': True}
 
 
 @app.route('/api/create-invoice', methods=['POST'])
