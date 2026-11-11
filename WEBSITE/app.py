@@ -34,6 +34,20 @@ def index():
     with db() as c: products=c.execute('SELECT * FROM products WHERE active=1 ORDER BY id DESC').fetchall()
     return render_template('index.html',products=products)
 
+@app.route('/miniapp')
+def miniapp():
+    with db() as c:
+        products=c.execute('SELECT * FROM products WHERE active=1 ORDER BY id DESC').fetchall()
+    return render_template('miniapp.html', products=products)
+
+@app.route('/miniapp/admin')
+@admin_required
+def miniapp_admin():
+    with db() as c:
+        products=c.execute('SELECT * FROM products ORDER BY id DESC').fetchall()
+        orders=c.execute("""SELECT o.*,p.name product_name FROM orders o LEFT JOIN products p ON p.id=o.product_id ORDER BY o.id DESC""").fetchall()
+    return render_template('miniapp_admin.html', products=products, orders=orders)
+
 @app.route('/order/<int:pid>', methods=['POST'])
 def order(pid):
     customer=request.form.get('customer','').strip(); contact=request.form.get('contact','').strip()
