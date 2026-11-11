@@ -57,6 +57,8 @@ def init_db():
         cols = [r['name'] for r in c.execute('PRAGMA table_info(products)').fetchall()]
         if 'stars_price' not in cols:
             c.execute('ALTER TABLE products ADD COLUMN stars_price INTEGER NOT NULL DEFAULT 0')
+        if 'image_url' not in cols:
+            c.execute("ALTER TABLE products ADD COLUMN image_url TEXT NOT NULL DEFAULT ''")
         c.execute("""CREATE TABLE IF NOT EXISTS star_payments(payload TEXT PRIMARY KEY, order_ids TEXT NOT NULL, total_stars INTEGER NOT NULL, telegram_user_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
         c.execute("""CREATE TABLE IF NOT EXISTS product_keys(id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL, key_text TEXT NOT NULL, claimed_order_id INTEGER, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(product_id,key_text))""")
 
@@ -277,16 +279,30 @@ def admin():
 @app.route('/admin/product',methods=['POST'])
 @admin_required
 def add_product():
-    name=request.form.get('name','').strip(); desc=request.form.get('description','').strip()
+    name=request.form.get('name','').strip(); desc=request.form.get('description','').strip(); image_url=request.form.get('image_url','').strip()
     try: price=float(request.form.get('price','0').replace(',','.'))
     except ValueError: price=0
     if not name or price<=0: flash('Укажите название и цену больше нуля.')
+    elif image_url and not image_url.startswith(('https://','http://')): flash('Ссылка на картинку должна начинаться с https:// или http://.')
     else:
         try: stars_price = max(0, int(request.form.get('stars_price', '0') or 0))
         except ValueError: stars_price = 0
-        with db() as c: c.execute('INSERT INTO products(name,price,description,stars_price) VALUES(?,?,?,?)',(name,price,desc,stars_price))
+        with db() as c: c.execute('INSERT INTO products(name,price,description,stars_price,image_url) VALUES(?,?,?,?,?)',(name,price,desc,stars_price,image_url))
         flash('Товар добавлен.')
     return redirect(url_for('admin'))
+
+
+@app.route('/admin/product/<int:pid>/image', methods=['POST'])
+@admin_required
+def update_product_image(pid):
+    image_url = request.form.get('image_url', '').strip()
+    if image_url and not image_url.startswith(('https://', 'http://')):
+        flash('Ссылка должна начинаться с https:// или http://.')
+    else:
+        with db() as c:
+            c.execute('UPDATE products SET image_url=? WHERE id=?', (image_url, pid))
+        flash('Картинка товара обновлена.' if image_url else 'Картинка товара удалена.')
+    return redirect(url_for('miniapp_admin'))
 
 
 @app.route('/admin/product/<int:pid>/stars', methods=['POST'])
