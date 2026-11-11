@@ -55,7 +55,8 @@ function add(id, name, price) {
     alert('Не удалось добавить товар. Обнови страницу и попробуй ещё раз.');
     return;
   }
-  const card = document.querySelector('[data-product=\"' + id + '\"]');\n  const physical = !!(card && Number(card.dataset.physical) === 1);\n  const item = cart.get(id) || { name: String(name), price, qty: 0, physical };
+  const card = document.querySelector('[data-product=\"' + id + '\"]');
+  const physical = !!(card && Number(card.dataset.physical) === 1);\n  const item = cart.get(id) || { name: String(name), price, qty: 0, physical };
   item.qty += 1;
   cart.set(id, item);
   const count = [...cart.values()].reduce((sum, x) => sum + x.qty, 0);
@@ -106,19 +107,26 @@ async function checkout() {
   const message = document.getElementById('checkoutMessage');
   const button = document.getElementById('checkoutBtn');
   if (!cart.size) { message.textContent = 'Сначала добавь товары в корзину.'; return; }
-  const physicalItems = [...cart.values()].filter(x => x.physical).length;\n  if (physicalItems && physicalItems !== cart.size) { message.textContent = 'Раздели физические и цифровые товары на разные заказы.'; return; }
+  const physicalItems = [...cart.values()].filter(x => x.physical).length;
+  if (physicalItems && physicalItems !== cart.size) { message.textContent = 'Раздели физические и цифровые товары на разные заказы.'; return; }
   if (!customer || !contact) { message.textContent = 'Заполни имя и контакт.'; return; }
   button.disabled = true; button.textContent = 'ОТПРАВЛЯЕМ...'; message.textContent = '';
   try {
     if (!window.Telegram || !Telegram.WebApp || !Telegram.WebApp.initData) throw new Error('Открой CrownStore через Telegram-бота.');
     Telegram.WebApp.ready();
-    const rubleMode = physicalItems === cart.size;\n    const response = await fetch(rubleMode ? '/api/create-rub-order' : '/api/create-invoice', {method:'POST',headers:{'Content-Type':'application/json','X-Telegram-Init-Data':Telegram.WebApp.initData},
+    const rubleMode = physicalItems === cart.size;
+    const response = await fetch(rubleMode ? '/api/create-rub-order' : '/api/create-invoice', {method:'POST',headers:{'Content-Type':'application/json','X-Telegram-Init-Data':Telegram.WebApp.initData},
       body:JSON.stringify({customer,contact,items:[...cart.entries()].map(([id,item])=>({id,qty:item.qty}))})});
     const result = await response.json();
     if (!response.ok || !result.ok) throw new Error(result.error || 'Не удалось создать счёт.');
     if (rubleMode) {
-      document.getElementById('rubPayment').hidden = false;\n      window.currentRublePayment = result;
-      document.getElementById('rubDetails').textContent = 'Заказ ' + result.payment_ref + ' · Сумма: ' + result.total + ' ₽ · ' + result.bank_name + ' · Получатель: ' + result.recipient + ' · Реквизиты: ' + result.account_details;\n      message.textContent = result.message;\n      return;\n    }\n    if (typeof Telegram.WebApp.openInvoice !== 'function') throw new Error('Обнови Telegram до актуальной версии.');
+      document.getElementById('rubPayment').hidden = false;
+      window.currentRublePayment = result;
+      document.getElementById('rubDetails').textContent = 'Заказ ' + result.payment_ref + ' · Сумма: ' + result.total + ' ₽ · ' + result.bank_name + ' · Получатель: ' + result.recipient + ' · Реквизиты: ' + result.account_details;
+      message.textContent = result.message;
+      return;
+    }
+    if (typeof Telegram.WebApp.openInvoice !== 'function') throw new Error('Обнови Telegram до актуальной версии.');
     message.textContent = 'Счёт создан на ' + result.total_stars + ' ⭐. Ожидаем оплату...';
     Telegram.WebApp.openInvoice(result.invoice_url, status => {
       if (status === 'paid') {
