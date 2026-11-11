@@ -1,1 +1,27 @@
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OXIDE STORE</title><link rel="stylesheet" href="{{ url_for('static',filename='style.css') }}"></head><body><header><a class="logo" href="/">OXIDE<span>STORE</span></a><a href="/admin/login">АДМИН-ПАНЕЛЬ</a></header><main>{% with messages=get_flashed_messages() %}{% if messages %}<div class="notice">{% for m in messages %}<p>{{m}}</p>{% endfor %}</div>{% endif %}{% endwith %}{% block content %}{% endblock %}</main><footer>OXIDE STORE · Цифровые товары · Демоверсия магазина</footer></body></html>
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#11100f">
+  <title>OXIDE STORE — магазин</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800;900&family=Oswald:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static',filename='style.css') }}">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="OXIDE STORE"><span class="brand-mark">O</span><span>OXIDE<small>STORE</small></span></a>
+    <nav class="main-nav"><a href="#catalog">Каталог</a><a href="#how-to-order">Как заказать</a></nav>
+    <a class="header-action" href="#catalog"><span class="bag-icon">▣</span> Выбрать товар</a>
+  </header>
+  <main>
+    {% with messages=get_flashed_messages() %}
+      {% if messages %}<div class="notice">{% for m in messages %}<p>{{m}}</p>{% endfor %}</div>{% endif %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="site-footer"><a class="brand footer-brand" href="/"><span class="brand-mark">O</span><span>OXIDE<small>STORE</small></span></a><p>Магазин цифровых товаров</p><span class="footer-line">© OXIDE STORE</span></footer>
+</body>
+</html>
