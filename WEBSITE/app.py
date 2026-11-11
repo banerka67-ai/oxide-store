@@ -82,6 +82,9 @@ def init_db():
             c.execute('ALTER TABLE products ADD COLUMN stars_price INTEGER NOT NULL DEFAULT 0')
         if 'image_url' not in cols:
             c.execute("ALTER TABLE products ADD COLUMN image_url TEXT NOT NULL DEFAULT ''")
+        if 'physical' not in cols:
+            c.execute('ALTER TABLE products ADD COLUMN physical INTEGER NOT NULL DEFAULT 0')
+        c.execute("""CREATE TABLE IF NOT EXISTS ruble_payments(id INTEGER PRIMARY KEY AUTOINCREMENT, payment_ref TEXT NOT NULL UNIQUE, order_ids TEXT NOT NULL, total_cents INTEGER NOT NULL, telegram_user_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'Ожидает оплаты', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
         c.execute("""CREATE TABLE IF NOT EXISTS star_payments(payload TEXT PRIMARY KEY, order_ids TEXT NOT NULL, total_stars INTEGER NOT NULL, telegram_user_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
         c.execute("""CREATE TABLE IF NOT EXISTS product_keys(id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL, key_text TEXT NOT NULL, claimed_order_id INTEGER, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(product_id,key_text))""")
 
@@ -157,7 +160,8 @@ def miniapp_admin():
         orders=c.execute("""SELECT o.*,p.name product_name FROM orders o LEFT JOIN products p ON p.id=o.product_id ORDER BY o.id DESC""").fetchall()
         stock_rows=c.execute('SELECT product_id,COUNT(*) AS stock FROM product_keys WHERE claimed_order_id IS NULL GROUP BY product_id').fetchall()
         stock={row['product_id']:row['stock'] for row in stock_rows}
-    return render_template('miniapp_admin.html', products=products, orders=orders, stock=stock)
+        ruble_payments=c.execute('SELECT * FROM ruble_payments ORDER BY id DESC').fetchall()
+    return render_template('miniapp_admin.html', products=products, orders=orders, stock=stock, ruble_payments=ruble_payments)
 
 
 @app.route('/api/order', methods=['POST'])
@@ -217,6 +221,56 @@ def verify_telegram_init_data(init_data):
         return int(user.get('id'))
     except Exception:
         return None
+
+@app.route('/api/create-rub-order', methods=['POST'])
+def create_rub_order():
+    telegram_user_id = verify_telegram_init_data(request.headers.get('X-Telegram-Init-Data', ''))
+    if not telegram_user_id:
+        return {'ok': False, 'error': 'Открой магазин через Telegram.'}, 401
+    bank_name = os.getenv('RUB_BANK_NAME', '').strip()
+    recipient = os.getenv('RUB_RECIPIENT', '').strip()
+    details = os.getenv('RUB_ACCOUNT_DETAILS', '').strip()
+    if not bank_name or not recipient or not details:
+        return {'ok': False, 'error': 'Реквизиты ещё не настроены. Свяжись с продавцом.'}, 503
+    data = request.get_json(silent=True) or {}
+    customer = str(data.get('customer', '')).strip()[:80]
+    contact = str(data.get('contact', '')).strip()[:120]
+    items = data.get('items')
+    if not customer or not contact or not isinstance(items, list) or not items or len(items) > 30:
+        return {'ok': False, 'error': 'Проверь имя, контакт и корзину.'}, 400
+    clean = {}
+    for item in items:
+        try:
+            pid, qty = int(item.get('id')), int(item.get('qty'))
+        except (TypeError, ValueError, AttributeError):
+            return {'ok': False, 'error': 'Некорректная корзина.'}, 400
+        if pid <= 0 or qty < 1 or qty > 99:
+            return {'ok': False, 'error': 'Некорректное количество.'}, 400
+        clean[pid] = min(99, clean.get(pid, 0) + qty)
+    order_ids, total_cents = [], 0
+    with db() as c:
+        for pid, qty in clean.items():
+            product = c.execute('SELECT id,price,physical FROM products WHERE id=? AND active=1', (pid,)).fetchone()
+            if not product:
+                return {'ok': False, 'error': 'Один из товаров недоступен.'}, 400
+            if not int(product['physical'] or 0):
+                return {'ok': False, 'error': 'Оплата по реквизитам доступна только для физических товаров.'}, 400
+            cents = int(round(float(product['price']) * 100)) * qty
+            if cents <= 0:
+                return {'ok': False, 'error': 'Некорректная цена товара.'}, 400
+            cur = c.execute("INSERT INTO orders(customer,contact,product_id,quantity,total,status) VALUES(?,?,?,?,?,'Ожидает оплаты')",
+                            (customer, contact, pid, qty, cents / 100))
+            order_ids.append(cur.lastrowid)
+            total_cents += cents
+        if not order_ids or total_cents > 100000000:
+            return {'ok': False, 'error': 'Слишком большая сумма заказа.'}, 400
+        payment_ref = 'CS-' + secrets.token_hex(5).upper()
+        c.execute('INSERT INTO ruble_payments(payment_ref,order_ids,total_cents,telegram_user_id) VALUES(?,?,?,?)',
+                  (payment_ref, json.dumps(order_ids), total_cents, telegram_user_id))
+    return {'ok': True, 'payment_ref': payment_ref, 'total': f'{total_cents / 100:.2f}',
+            'bank_name': bank_name, 'recipient': recipient, 'account_details': details,
+            'message': 'Переведи точную сумму и дождись подтверждения продавца.'}
+
 
 @app.route('/api/create-invoice', methods=['POST'])
 def create_star_invoice():
@@ -316,7 +370,7 @@ def add_product():
             uploaded = save_product_image(request.files.get('image_file'))
             if uploaded: image_url = uploaded
             with db() as c:
-                c.execute('INSERT INTO products(name,price,description,stars_price,image_url) VALUES(?,?,?,?,?)',(name,price,desc,stars_price,image_url))
+                c.execute('INSERT INTO products(name,price,description,stars_price,image_url,physical) VALUES(?,?,?,?,?,?)',(name,price,desc,stars_price,image_url,1 if request.form.get('physical') == 'on' else 0))
             flash('Товар добавлен.')
         except ValueError as exc:
             flash(str(exc))
@@ -333,6 +387,32 @@ def update_product_image(pid):
         with db() as c:
             c.execute('UPDATE products SET image_url=? WHERE id=?', (image_url, pid))
         flash('Картинка товара обновлена.' if image_url else 'Картинка товара удалена.')
+    return redirect(url_for('miniapp_admin'))
+
+
+@app.route('/admin/product/<int:pid>/physical', methods=['POST'])
+@admin_required
+def update_product_physical(pid):
+    physical = 1 if request.form.get('physical') == 'on' else 0
+    with db() as c:
+        c.execute('UPDATE products SET physical=? WHERE id=?', (physical, pid))
+    flash('Тип товара обновлён.')
+    return redirect(url_for('miniapp_admin'))
+
+
+@app.route('/admin/ruble-payment/<int:payment_id>/confirm', methods=['POST'])
+@admin_required
+def confirm_ruble_payment(payment_id):
+    with db() as c:
+        payment = c.execute('SELECT * FROM ruble_payments WHERE id=?', (payment_id,)).fetchone()
+        if not payment:
+            abort(404)
+        if payment['status'] != 'Оплачен':
+            ids = [int(x) for x in json.loads(payment['order_ids'])]
+            for oid in ids:
+                c.execute("UPDATE orders SET status='Оплачен' WHERE id=? AND status='Ожидает оплаты'", (oid,))
+            c.execute("UPDATE ruble_payments SET status='Оплачен' WHERE id=?", (payment_id,))
+    flash('Платёж отмечен оплаченным. Перед подтверждением проверь поступление денег в банке.')
     return redirect(url_for('miniapp_admin'))
 
 
