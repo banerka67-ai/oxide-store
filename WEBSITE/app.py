@@ -58,6 +58,7 @@ def init_db():
         if 'stars_price' not in cols:
             c.execute('ALTER TABLE products ADD COLUMN stars_price INTEGER NOT NULL DEFAULT 0')
         c.execute("""CREATE TABLE IF NOT EXISTS star_payments(payload TEXT PRIMARY KEY, order_ids TEXT NOT NULL, total_stars INTEGER NOT NULL, telegram_user_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS product_keys(id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL, key_text TEXT NOT NULL, claimed_order_id INTEGER, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(product_id,key_text))""")
 
 def admin_required(fn):
     @wraps(fn)
@@ -300,6 +301,73 @@ def update_product_stars(pid):
             c.execute('UPDATE products SET stars_price=? WHERE id=?', (stars_price, pid))
         flash('Цена в Stars обновлена.')
     return redirect(url_for('miniapp_admin'))
+
+@app.route('/admin/product/<int:pid>/keys', methods=['POST'])
+@admin_required
+def add_product_keys(pid):
+    raw = request.form.get('keys', '')
+    keys = list(dict.fromkeys(line.strip() for line in raw.splitlines() if line.strip()))
+    if not keys:
+        flash('Вставь ключи: каждый с новой строки.')
+    elif len(keys) > 1000 or any(len(k) > 500 for k in keys):
+        flash('Слишком много ключей или слишком длинная строка.')
+    else:
+        with db() as c:
+            if not c.execute('SELECT id FROM products WHERE id=?', (pid,)).fetchone(): abort(404)
+            before = c.total_changes
+            c.executemany('INSERT OR IGNORE INTO product_keys(product_id,key_text) VALUES(?,?)', [(pid,k) for k in keys])
+            added = c.total_changes - before
+        flash(f'Добавлено ключей: {added}. Дубликаты пропущены.')
+    return redirect(url_for('miniapp_admin'))
+
+@app.route('/admin/order/<int:oid>/deliver', methods=['POST'])
+@admin_required
+def deliver_order(oid):
+    with db() as c:
+        order = c.execute('SELECT * FROM orders WHERE id=?', (oid,)).fetchone()
+        if not order: abort(404)
+        if order['status'] not in ('Оплачен', 'Выполнен'):
+            flash('Сначала дождись подтверждения оплаты Stars.')
+            return redirect(url_for('miniapp_admin'))
+        payments = c.execute("SELECT order_ids,telegram_user_id FROM star_payments WHERE status='paid'").fetchall()
+        user_id = next((int(p['telegram_user_id']) for p in payments if oid in [int(x) for x in json.loads(p['order_ids'])]), None)
+        if not user_id:
+            flash('Не найдено подтверждение оплаты Stars для этого заказа.')
+            return redirect(url_for('miniapp_admin'))
+        assigned = c.execute('SELECT id,key_text FROM product_keys WHERE claimed_order_id=? ORDER BY id', (oid,)).fetchall()
+        if not assigned:
+            available = c.execute('SELECT id,key_text FROM product_keys WHERE product_id=? AND claimed_order_id IS NULL ORDER BY id LIMIT ?', (order['product_id'], int(order['quantity']))).fetchall()
+            if len(available) < int(order['quantity']):
+                flash(f'Недостаточно ключей. Нужно: {order["quantity"]}, доступно: {len(available)}.')
+                return redirect(url_for('miniapp_admin'))
+            for key in available: c.execute('UPDATE product_keys SET claimed_order_id=? WHERE id=? AND claimed_order_id IS NULL', (oid, key['id']))
+            assigned = available
+    keys = [x['key_text'] for x in assigned]
+    msg = '👑 CrownStore — заказ №' + str(oid) + ' выполнен!\n\nТвои ключи:\n' + '\n'.join(keys)
+    try:
+        result = telegram_api('sendMessage', {'chat_id': user_id, 'text': msg})
+        if not result or not result.get('ok'): raise RuntimeError('Telegram sendMessage failed')
+    except Exception:
+        app.logger.exception('Could not send keys to buyer')
+        flash('Ключи закреплены за заказом, но сообщение не отправилось. Нажми повторную отправку.')
+        return redirect(url_for('miniapp_admin'))
+    with db() as c: c.execute("UPDATE orders SET status='Выполнен' WHERE id=?", (oid,))
+    flash('Ключи отправлены покупателю в Telegram.')
+    return redirect(url_for('miniapp_admin'))
+
+@app.route('/api/my-purchases')
+def my_purchases():
+    user_id = verify_telegram_init_data(request.headers.get('X-Telegram-Init-Data', ''))
+    if not user_id: return {'ok': False, 'error': 'Открой магазин через Telegram.'}, 401
+    with db() as c:
+        paid = c.execute("SELECT order_ids FROM star_payments WHERE telegram_user_id=? AND status='paid'", (user_id,)).fetchall()
+        ids = {int(oid) for row in paid for oid in json.loads(row['order_ids'])}
+        purchases = []
+        for oid in ids:
+            rows = c.execute('SELECT o.id order_id,o.created_at,p.name product_name,k.key_text FROM orders o JOIN product_keys k ON k.claimed_order_id=o.id JOIN products p ON p.id=o.product_id WHERE o.id=? ORDER BY k.id', (oid,)).fetchall()
+            purchases.extend([dict(x) for x in rows])
+    purchases.sort(key=lambda x:x['order_id'], reverse=True)
+    return {'ok': True, 'purchases': purchases}
 
 @app.route('/admin/product/<int:pid>/toggle',methods=['POST'])
 @admin_required
