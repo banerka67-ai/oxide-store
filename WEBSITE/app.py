@@ -1,4 +1,4 @@
-import os, sqlite3
+import os, sqlite3, json, hashlib, urllib.request, urllib.error
 from pathlib import Path
 from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, session, flash, abort
@@ -12,6 +12,39 @@ DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', 'dev-only-change-me')
 ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'change-me')
+BOT_TOKEN = os.getenv('BOT_TOKEN', '').strip()
+PUBLIC_URL = os.getenv('PUBLIC_URL', 'https://oxide-store.onrender.com').rstrip('/')
+WEBHOOK_SECRET = hashlib.sha256(app.secret_key.encode()).hexdigest()
+
+def telegram_api(method, payload):
+    if not BOT_TOKEN:
+        return None
+    data = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(
+        f'https://api.telegram.org/bot{BOT_TOKEN}/{method}',
+        data=data,
+        headers={'Content-Type': 'application/json'},
+        method='POST'
+    )
+    with urllib.request.urlopen(req, timeout=15) as response:
+        return json.loads(response.read().decode('utf-8'))
+
+def configure_telegram_webhook():
+    if not BOT_TOKEN:
+        app.logger.warning('BOT_TOKEN is not configured; Telegram /start is disabled.')
+        return
+    try:
+        result = telegram_api('setWebhook', {
+            'url': f'{PUBLIC_URL}/telegram/webhook',
+            'secret_token': WEBHOOK_SECRET,
+            'allowed_updates': ['message']
+        })
+        if result and result.get('ok'):
+            app.logger.info('Telegram webhook configured.')
+        else:
+            app.logger.error('Telegram webhook setup failed.')
+    except Exception:
+        app.logger.exception('Could not configure Telegram webhook.')
 
 def db():
     con=sqlite3.connect(DB_PATH); con.row_factory=sqlite3.Row; return con
@@ -28,6 +61,31 @@ def admin_required(fn):
         if not session.get('admin'): return redirect(url_for('admin_login'))
         return fn(*a,**kw)
     return wrapped
+
+@app.route('/telegram/webhook', methods=['POST'])
+def telegram_webhook():
+    if request.headers.get('X-Telegram-Bot-Api-Secret-Token', '') != WEBHOOK_SECRET:
+        abort(403)
+    update = request.get_json(silent=True) or {}
+    message = update.get('message') or {}
+    text = (message.get('text') or '').strip()
+    chat = message.get('chat') or {}
+    chat_id = chat.get('id')
+    if chat_id and text.split(' ', 1)[0].split('@', 1)[0] == '/start':
+        try:
+            telegram_api('sendMessage', {
+                'chat_id': chat_id,
+                'text': 'Добро пожаловать в OXIDE STORE!\\n\\nЗдесь ты можешь посмотреть каталог и оформить заказ. Нажми кнопку ниже, чтобы открыть магазин.',
+                'reply_markup': {
+                    'inline_keyboard': [[{
+                        'text': 'Открыть магазин',
+                        'web_app': {'url': f'{PUBLIC_URL}/miniapp'}
+                    }]]
+                }
+            })
+        except Exception:
+            app.logger.exception('Could not send Telegram welcome message.')
+    return {'ok': True}
 
 @app.route('/')
 def index():
@@ -106,4 +164,5 @@ def update_order(oid):
     return redirect(url_for('admin'))
 
 init_db()
+configure_telegram_webhook()
 if __name__=='__main__': app.run(host='0.0.0.0',port=int(os.getenv('PORT', '5000')),debug=False)
