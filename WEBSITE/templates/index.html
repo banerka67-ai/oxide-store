@@ -3,11 +3,11 @@
 <section class="hero">
   <div class="hero-shade"></div>
   <div class="hero-content">
-    <p class="eyebrow"><span class="eyebrow-dot"></span> OXIDE WORLD · DIGITAL STORE</p>
+    <p class="eyebrow"><span class="eyebrow-dot"></span> CrownStore · DIGITAL STORE</p>
     <h1>ТВОЙ МИР.<br><span>ТВОИ ПРАВИЛА.</span></h1>
     <p class="hero-copy">Всё необходимое для твоего следующего приключения. Выбирай товары в каталоге и оформляй заказ в пару кликов.</p>
     <a class="primary-button" href="#catalog">СМОТРЕТЬ КАТАЛОГ <span>↗</span></a>
-    <div class="hero-meta"><span><i></i> МАГАЗИН ОНЛАЙН</span><span>OXIDE STORE / 001</span></div>
+    <div class="hero-meta"><span><i></i> МАГАЗИН ОНЛАЙН</span><span>CROWN STORE / 001</span></div>
   </div>
   <div class="hero-corner">SURVIVE<br>THE WASTELAND</div>
 </section>
@@ -23,7 +23,7 @@
   <section class="products">
     {% for p in products %}
     <article class="product">
-      <div class="product-art"><span class="product-art-label">OXIDE / ITEM {{ '%03d'|format(loop.index) }}</span><span class="product-art-symbol">O</span><span class="product-art-bottom">DIGITAL GOODS</span></div>
+      <div class="product-art"><span class="product-art-label">CROWN / ITEM {{ '%03d'|format(loop.index) }}</span><span class="product-art-symbol">O</span><span class="product-art-bottom">DIGITAL GOODS</span></div>
       <div class="product-info"><div class="product-category">ЦИФРОВОЙ ТОВАР</div><h3>{{p.name}}</h3><p class="product-description">{{p.description}}</p><div class="product-buy"><strong>{{'%.2f'|format(p.price)}} <small>₽</small></strong><a class="buy-link" href="#order-{{p.id}}">КУПИТЬ <span>↗</span></a></div>
       <form class="order-form" id="order-{{p.id}}" action="{{url_for('order',pid=p.id)}}" method="post"><label>Оформление заявки</label><input name="customer" placeholder="Ваше имя" required><input name="contact" placeholder="Telegram @username или контакт" required><button type="submit">ОСТАВИТЬ ЗАЯВКУ <span>→</span></button></form></div>
     </article>
