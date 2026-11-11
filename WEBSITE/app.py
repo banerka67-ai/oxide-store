@@ -1,4 +1,4 @@
-import os, sqlite3, json, hashlib, urllib.request, urllib.error
+import os, sqlite3, json, hashlib, hmac, secrets, urllib.request, urllib.error
 from pathlib import Path
 from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, session, flash, abort
@@ -37,7 +37,7 @@ def configure_telegram_webhook():
         result = telegram_api('setWebhook', {
             'url': f'{PUBLIC_URL}/telegram/webhook',
             'secret_token': WEBHOOK_SECRET,
-            'allowed_updates': ['message']
+            'allowed_updates': ['message', 'pre_checkout_query']
         })
         if result and result.get('ok'):
             app.logger.info('Telegram webhook configured.')
@@ -54,6 +54,10 @@ def init_db():
         c.execute("""CREATE TABLE IF NOT EXISTS products(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,price REAL NOT NULL,description TEXT NOT NULL DEFAULT '',active INTEGER NOT NULL DEFAULT 1)""")
         c.execute("""CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT,customer TEXT NOT NULL,contact TEXT NOT NULL,product_id INTEGER NOT NULL,quantity INTEGER NOT NULL DEFAULT 1,total REAL NOT NULL,status TEXT NOT NULL DEFAULT 'Новый',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
         c.execute("""CREATE TABLE IF NOT EXISTS cart_sessions(sid TEXT NOT NULL,product_id INTEGER NOT NULL,quantity INTEGER NOT NULL,PRIMARY KEY(sid,product_id))""")
+        cols = [r['name'] for r in c.execute('PRAGMA table_info(products)').fetchall()]
+        if 'stars_price' not in cols:
+            c.execute('ALTER TABLE products ADD COLUMN stars_price INTEGER NOT NULL DEFAULT 0')
+        c.execute("""CREATE TABLE IF NOT EXISTS star_payments(payload TEXT PRIMARY KEY, order_ids TEXT NOT NULL, total_stars INTEGER NOT NULL, telegram_user_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
 
 def admin_required(fn):
     @wraps(fn)
@@ -67,7 +71,28 @@ def telegram_webhook():
     if request.headers.get('X-Telegram-Bot-Api-Secret-Token', '') != WEBHOOK_SECRET:
         abort(403)
     update = request.get_json(silent=True) or {}
+    pre = update.get('pre_checkout_query')
+    if pre:
+        payload = str(pre.get('invoice_payload', ''))
+        with db() as c:
+            payment = c.execute('SELECT total_stars,status FROM star_payments WHERE payload=?', (payload,)).fetchone()
+        valid = bool(payment and payment['status'] == 'pending' and pre.get('currency') == 'XTR' and int(pre.get('total_amount', 0)) == int(payment['total_stars']))
+        try:
+            telegram_api('answerPreCheckoutQuery', {'pre_checkout_query_id': pre.get('id'), 'ok': valid, **({} if valid else {'error_message': 'Счёт недействителен. Создай новый заказ.'})})
+        except Exception:
+            app.logger.exception('Could not answer Telegram pre-checkout query.')
+        return {'ok': True}
     message = update.get('message') or {}
+    successful = message.get('successful_payment')
+    if successful:
+        payload = str(successful.get('invoice_payload', ''))
+        with db() as c:
+            payment = c.execute('SELECT order_ids,total_stars,status FROM star_payments WHERE payload=?', (payload,)).fetchone()
+            if payment and payment['status'] == 'pending' and successful.get('currency') == 'XTR' and int(successful.get('total_amount', 0)) == int(payment['total_stars']):
+                for oid in json.loads(payment['order_ids']):
+                    c.execute("UPDATE orders SET status='Оплачен' WHERE id=?", (int(oid),))
+                c.execute("UPDATE star_payments SET status='paid' WHERE payload=?", (payload,))
+        return {'ok': True}
     text = (message.get('text') or '').strip()
     chat = message.get('chat') or {}
     chat_id = chat.get('id')
@@ -142,6 +167,79 @@ def create_miniapp_order():
     return {'ok': True, 'order_ids': order_ids, 'total': round(total, 2),
             'message': 'Заявка отправлена! Администратор свяжется с тобой для подтверждения.'}
 
+
+def verify_telegram_init_data(init_data):
+    if not BOT_TOKEN or not init_data:
+        return None
+    try:
+        from urllib.parse import parse_qsl
+        pairs = dict(parse_qsl(init_data, keep_blank_values=True))
+        received_hash = pairs.pop('hash', '')
+        if not received_hash:
+            return None
+        check_string = '\n'.join(f'{k}={v}' for k, v in sorted(pairs.items()))
+        secret = hmac.new(b'WebAppData', BOT_TOKEN.encode(), hashlib.sha256).digest()
+        calculated = hmac.new(secret, check_string.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(calculated, received_hash):
+            return None
+        import time
+        if int(pairs.get('auth_date', '0')) < int(time.time()) - 86400:
+            return None
+        user = json.loads(pairs.get('user', '{}'))
+        return int(user.get('id'))
+    except Exception:
+        return None
+
+@app.route('/api/create-invoice', methods=['POST'])
+def create_star_invoice():
+    telegram_user_id = verify_telegram_init_data(request.headers.get('X-Telegram-Init-Data', ''))
+    if not telegram_user_id:
+        return {'ok': False, 'error': 'Открой магазин через Telegram-бота, чтобы оплатить Stars.'}, 401
+    data = request.get_json(silent=True) or {}
+    customer = str(data.get('customer', '')).strip()[:80]
+    contact = str(data.get('contact', '')).strip()[:120]
+    items = data.get('items')
+    if not customer or not contact or not isinstance(items, list) or not items or len(items) > 30:
+        return {'ok': False, 'error': 'Проверь имя, контакт и корзину.'}, 400
+    clean = {}
+    for item in items:
+        try:
+            pid, qty = int(item.get('id')), int(item.get('qty'))
+        except (TypeError, ValueError, AttributeError):
+            return {'ok': False, 'error': 'Некорректная корзина.'}, 400
+        if pid <= 0 or qty < 1 or qty > 99:
+            return {'ok': False, 'error': 'Некорректное количество.'}, 400
+        clean[pid] = min(99, clean.get(pid, 0) + qty)
+    payload = secrets.token_urlsafe(24)
+    order_ids, total_stars, title_parts = [], 0, []
+    with db() as c:
+        for pid, qty in clean.items():
+            product = c.execute('SELECT id,name,stars_price FROM products WHERE id=? AND active=1', (pid,)).fetchone()
+            if not product:
+                return {'ok': False, 'error': 'Товар больше недоступен. Обнови каталог.'}, 400
+            stars = int(product['stars_price'] or 0)
+            if stars < 1:
+                return {'ok': False, 'error': f'Для товара «{product["name"]}» ещё не задана цена в Stars.'}, 400
+            cur = c.execute("INSERT INTO orders(customer,contact,product_id,quantity,total,status) VALUES(?,?,?,?,?,'Ожидает оплаты')", (customer, contact, pid, qty, float(stars * qty)))
+            order_ids.append(cur.lastrowid)
+            total_stars += stars * qty
+            title_parts.append(product['name'])
+        if total_stars < 1 or total_stars > 1000000:
+            return {'ok': False, 'error': 'Некорректная сумма оплаты.'}, 400
+        c.execute('INSERT INTO star_payments(payload,order_ids,total_stars,telegram_user_id) VALUES(?,?,?,?)', (payload, json.dumps(order_ids), total_stars, telegram_user_id))
+    try:
+        invoice = telegram_api('createInvoiceLink', {'title': 'CrownStore заказ', 'description': ', '.join(title_parts)[:255] or 'Цифровые товары CrownStore', 'payload': payload, 'provider_token': '', 'currency': 'XTR', 'prices': [{'label': 'Заказ CrownStore', 'amount': total_stars}]})
+        if not invoice or not invoice.get('ok') or not invoice.get('result'):
+            raise RuntimeError('Telegram не создал счёт.')
+        return {'ok': True, 'invoice_url': invoice['result'], 'total_stars': total_stars}
+    except Exception:
+        app.logger.exception('Could not create Telegram Stars invoice.')
+        with db() as c:
+            for oid in order_ids:
+                c.execute('DELETE FROM orders WHERE id=? AND status=?', (oid, 'Ожидает оплаты'))
+            c.execute('DELETE FROM star_payments WHERE payload=?', (payload,))
+        return {'ok': False, 'error': 'Не удалось создать счёт Stars. Проверь BOT_TOKEN.'}, 502
+
 @app.route('/order/<int:pid>', methods=['POST'])
 def order(pid):
     customer=request.form.get('customer','').strip(); contact=request.form.get('contact','').strip()
@@ -181,7 +279,9 @@ def add_product():
     except ValueError: price=0
     if not name or price<=0: flash('Укажите название и цену больше нуля.')
     else:
-        with db() as c: c.execute('INSERT INTO products(name,price,description) VALUES(?,?,?)',(name,price,desc))
+        try: stars_price = max(0, int(request.form.get('stars_price', '0') or 0))
+        except ValueError: stars_price = 0
+        with db() as c: c.execute('INSERT INTO products(name,price,description,stars_price) VALUES(?,?,?,?)',(name,price,desc,stars_price))
         flash('Товар добавлен.')
     return redirect(url_for('admin'))
 
