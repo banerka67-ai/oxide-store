@@ -15,6 +15,7 @@ app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', 'dev-only-change-me')
 ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'change-me')
 BOT_TOKEN = os.getenv('BOT_TOKEN', '').strip()
+ADMIN_TELEGRAM_ID = os.getenv('ADMIN_TELEGRAM_ID', '').strip()
 PUBLIC_URL = os.getenv('PUBLIC_URL', 'https://oxide-store.onrender.com').rstrip('/')
 WEBHOOK_SECRET = hashlib.sha256(app.secret_key.encode()).hexdigest()
 UPLOAD_DIR = HERE / 'static' / 'uploads'
@@ -60,7 +61,7 @@ def configure_telegram_webhook():
         result = telegram_api('setWebhook', {
             'url': f'{PUBLIC_URL}/telegram/webhook',
             'secret_token': WEBHOOK_SECRET,
-            'allowed_updates': ['message', 'pre_checkout_query']
+            'allowed_updates': ['message', 'pre_checkout_query', 'callback_query']
         })
         if result and result.get('ok'):
             app.logger.info('Telegram webhook configured.')
@@ -84,7 +85,10 @@ def init_db():
             c.execute("ALTER TABLE products ADD COLUMN image_url TEXT NOT NULL DEFAULT ''")
         if 'physical' not in cols:
             c.execute('ALTER TABLE products ADD COLUMN physical INTEGER NOT NULL DEFAULT 0')
-        c.execute("""CREATE TABLE IF NOT EXISTS ruble_payments(id INTEGER PRIMARY KEY AUTOINCREMENT, payment_ref TEXT NOT NULL UNIQUE, order_ids TEXT NOT NULL, total_cents INTEGER NOT NULL, telegram_user_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'Ожидает оплаты', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS ruble_payments(id INTEGER PRIMARY KEY AUTOINCREMENT, payment_ref TEXT NOT NULL UNIQUE, order_ids TEXT NOT NULL, total_cents INTEGER NOT NULL, telegram_user_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'Ожидает оплаты', receipt_file_id TEXT NOT NULL DEFAULT '', admin_message_id INTEGER, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
+        rp_cols = [r['name'] for r in c.execute('PRAGMA table_info(ruble_payments)').fetchall()]
+        if 'receipt_file_id' not in rp_cols: c.execute("ALTER TABLE ruble_payments ADD COLUMN receipt_file_id TEXT NOT NULL DEFAULT ''")
+        if 'admin_message_id' not in rp_cols: c.execute('ALTER TABLE ruble_payments ADD COLUMN admin_message_id INTEGER')
         c.execute("""CREATE TABLE IF NOT EXISTS star_payments(payload TEXT PRIMARY KEY, order_ids TEXT NOT NULL, total_stars INTEGER NOT NULL, telegram_user_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
         c.execute("""CREATE TABLE IF NOT EXISTS product_keys(id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL, key_text TEXT NOT NULL, claimed_order_id INTEGER, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(product_id,key_text))""")
 
@@ -95,52 +99,123 @@ def admin_required(fn):
         return fn(*a,**kw)
     return wrapped
 
+def bot_send_catalog(chat_id):
+    with db() as c:
+        products = c.execute('SELECT id,name,price,description FROM products WHERE active=1 ORDER BY id DESC').fetchall()
+    if not products:
+        telegram_api('sendMessage', {'chat_id': chat_id, 'text': 'Пока товаров нет. Загляни позже!'})
+        return
+    rows = [[{'text': f"{p['name']} · {float(p['price']):.2f} ₽", 'callback_data': f"buy:{p['id']}"}] for p in products[:50]]
+    telegram_api('sendMessage', {'chat_id': chat_id, 'text': '👑 CrownStore\n\nВыбери товар:', 'reply_markup': {'inline_keyboard': rows}})
+
+def handle_bot_callback(query):
+    data = str(query.get('data') or '')
+    user = query.get('from') or {}
+    user_id = int(user.get('id') or 0)
+    chat_id = (query.get('message') or {}).get('chat', {}).get('id')
+    qid = query.get('id')
+    if data == 'catalog':
+        telegram_api('answerCallbackQuery', {'callback_query_id': qid})
+        bot_send_catalog(chat_id); return
+    if data.startswith('buy:'):
+        try: pid = int(data.split(':',1)[1])
+        except ValueError:
+            telegram_api('answerCallbackQuery', {'callback_query_id': qid, 'text': 'Некорректный товар.'}); return
+        bank=os.getenv('RUB_BANK_NAME','').strip(); recipient=os.getenv('RUB_RECIPIENT','').strip(); details=os.getenv('RUB_ACCOUNT_DETAILS','').strip()
+        if not bank or not recipient or not details:
+            telegram_api('answerCallbackQuery', {'callback_query_id': qid, 'text': 'Магазин пока настраивается.', 'show_alert': True}); return
+        with db() as c:
+            product=c.execute('SELECT * FROM products WHERE id=? AND active=1',(pid,)).fetchone()
+            if not product:
+                telegram_api('answerCallbackQuery', {'callback_query_id': qid, 'text': 'Товар уже недоступен.', 'show_alert': True}); return
+            stock=c.execute('SELECT COUNT(*) n FROM product_keys WHERE product_id=? AND claimed_order_id IS NULL',(pid,)).fetchone()['n']
+            if stock < 1:
+                telegram_api('answerCallbackQuery', {'callback_query_id': qid, 'text': 'Ключей временно нет.', 'show_alert': True}); return
+            cur=c.execute("INSERT INTO orders(customer,contact,product_id,quantity,total,status) VALUES(?,?,?,?,?,'Ожидает оплаты')",(str(user.get('first_name') or 'Покупатель')[:80],str(user_id),pid,1,float(product['price'])))
+            oid=cur.lastrowid; ref='CS-'+secrets.token_hex(5).upper(); cents=int(round(float(product['price'])*100))
+            c.execute('INSERT INTO ruble_payments(payment_ref,order_ids,total_cents,telegram_user_id) VALUES(?,?,?,?)',(ref,json.dumps([oid]),cents,user_id))
+        text=(f"👑 CrownStore\n\nТовар: {product['name']}\nЦена: {cents/100:.2f} ₽\nЗаказ: {ref}\n\nПереведи точную сумму:\nБанк: {bank}\nПолучатель: {recipient}\nРеквизиты: {details}\n\nПосле перевода отправь сюда ФОТО или СКРИНШОТ чека. После проверки оплаты бот отправит ключ.")
+        telegram_api('answerCallbackQuery', {'callback_query_id': qid, 'text': 'Заказ создан.'})
+        telegram_api('sendMessage', {'chat_id': chat_id, 'text': text}); return
+    if data.startswith(('rubok:', 'rubno:')):
+        if not ADMIN_TELEGRAM_ID or str(user_id) != ADMIN_TELEGRAM_ID:
+            telegram_api('answerCallbackQuery', {'callback_query_id': qid, 'text': 'Нет доступа.', 'show_alert': True}); return
+        action,raw_id=data.split(':',1)
+        try: payment_id=int(raw_id)
+        except ValueError: return
+        if action=='rubno':
+            with db() as c:
+                p=c.execute('SELECT * FROM ruble_payments WHERE id=?',(payment_id,)).fetchone()
+                if p and p['status'] not in ('Оплачен','Отклонён'):
+                    c.execute("UPDATE ruble_payments SET status='Отклонён' WHERE id=?",(payment_id,))
+                    ids=[int(x) for x in json.loads(p['order_ids'])]
+                    for oid in ids: c.execute("UPDATE orders SET status='Отменён' WHERE id=?",(oid,))
+                    telegram_api('sendMessage', {'chat_id':int(p['telegram_user_id']),'text':'❌ Чек отклонён. Если считаешь это ошибкой, напиши продавцу.'})
+            telegram_api('answerCallbackQuery', {'callback_query_id':qid,'text':'Чек отклонён.'}); return
+        buyer_id=None; batches=[]; error=None
+        with db() as c:
+            p=c.execute('SELECT * FROM ruble_payments WHERE id=?',(payment_id,)).fetchone()
+            if not p: error='Платёж не найден.'
+            elif p['status']=='Оплачен': error='Этот заказ уже подтверждён.'
+            else:
+                ids=[int(x) for x in json.loads(p['order_ids'])]
+                for oid in ids:
+                    order=c.execute('SELECT product_id,quantity FROM orders WHERE id=?',(oid,)).fetchone()
+                    if not order: error='Заказ не найден.'; break
+                    assigned=c.execute('SELECT key_text FROM product_keys WHERE claimed_order_id=? ORDER BY id',(oid,)).fetchall()
+                    if not assigned:
+                        available=c.execute('SELECT id,key_text FROM product_keys WHERE product_id=? AND claimed_order_id IS NULL ORDER BY id LIMIT ?',(order['product_id'],int(order['quantity']))).fetchall()
+                        if len(available)<int(order['quantity']): error=f'Недостаточно ключей для заказа №{oid}.'; break
+                        for key in available: c.execute('UPDATE product_keys SET claimed_order_id=? WHERE id=? AND claimed_order_id IS NULL',(oid,key['id']))
+                        assigned=available
+                    batches.append((oid,[x['key_text'] for x in assigned]))
+                if not error:
+                    buyer_id=int(p['telegram_user_id']); c.execute("UPDATE ruble_payments SET status='Оплачен' WHERE id=?",(payment_id,))
+                    for oid,_ in batches: c.execute("UPDATE orders SET status='Оплачен' WHERE id=?",(oid,))
+        if error: telegram_api('answerCallbackQuery', {'callback_query_id':qid,'text':error,'show_alert':True}); return
+        failed=False
+        for oid,keys in batches:
+            sent=telegram_api('sendMessage', {'chat_id':buyer_id,'text':f"👑 CrownStore — заказ №{oid} оплачен!\n\nТвой ключ:\n"+'\n'.join(keys)})
+            if not sent or not sent.get('ok'): failed=True
+            else:
+                with db() as c: c.execute("UPDATE orders SET status='Выполнен' WHERE id=?",(oid,))
+        telegram_api('answerCallbackQuery', {'callback_query_id':qid,'text':'Подтверждено. Ключ отправлен.' if not failed else 'Подтверждено, но отправка не удалась.'})
+        telegram_api('sendMessage', {'chat_id':user_id,'text':'✅ Заказ подтверждён и ключ отправлен.' if not failed else '⚠️ Оплата подтверждена, но ключ не удалось отправить. Проверь чат покупателя.'})
+
 @app.route('/telegram/webhook', methods=['POST'])
 def telegram_webhook():
-    if request.headers.get('X-Telegram-Bot-Api-Secret-Token', '') != WEBHOOK_SECRET:
-        abort(403)
-    update = request.get_json(silent=True) or {}
-    pre = update.get('pre_checkout_query')
-    if pre:
-        payload = str(pre.get('invoice_payload', ''))
+    if request.headers.get('X-Telegram-Bot-Api-Secret-Token', '') != WEBHOOK_SECRET: abort(403)
+    update=request.get_json(silent=True) or {}
+    if update.get('callback_query'):
+        try: handle_bot_callback(update['callback_query'])
+        except Exception: app.logger.exception('Bot callback failed')
+        return {'ok':True}
+    message=update.get('message') or {}; user=message.get('from') or {}; user_id=int(user.get('id') or 0); chat_id=(message.get('chat') or {}).get('id')
+    if message.get('successful_payment'): return {'ok':True}
+    text=(message.get('text') or '').strip(); command=text.split(' ',1)[0].split('@',1)[0]
+    if chat_id and command in ('/start','/catalog'):
+        telegram_api('sendMessage', {'chat_id':chat_id,'text':'👑 Добро пожаловать в CrownStore!\n\nВыбирай цифровой товар. После перевода рублей отправь чек сюда — после проверки бот пришлёт ключ.','reply_markup':{'inline_keyboard':[[{'text':'🛍 Открыть каталог','callback_data':'catalog'}]]}})
+        return {'ok':True}
+    photos=message.get('photo') or []
+    if chat_id and photos and user_id:
         with db() as c:
-            payment = c.execute('SELECT total_stars,status,telegram_user_id FROM star_payments WHERE payload=?', (payload,)).fetchone()
-        valid = bool(payment and payment['status'] == 'pending' and pre.get('currency') == 'XTR' and int(pre.get('total_amount', 0)) == int(payment['total_stars']) and int((pre.get('from') or {}).get('id', 0)) == int(payment['telegram_user_id']))
-        try:
-            telegram_api('answerPreCheckoutQuery', {'pre_checkout_query_id': pre.get('id'), 'ok': valid, **({} if valid else {'error_message': 'Счёт недействителен. Создай новый заказ.'})})
-        except Exception:
-            app.logger.exception('Could not answer Telegram pre-checkout query.')
-        return {'ok': True}
-    message = update.get('message') or {}
-    successful = message.get('successful_payment')
-    if successful:
-        payload = str(successful.get('invoice_payload', ''))
-        with db() as c:
-            payment = c.execute('SELECT order_ids,total_stars,status,telegram_user_id FROM star_payments WHERE payload=?', (payload,)).fetchone()
-            if payment and payment['status'] == 'pending' and successful.get('currency') == 'XTR' and int(successful.get('total_amount', 0)) == int(payment['total_stars']) and int((message.get('from') or {}).get('id', 0)) == int(payment['telegram_user_id']):
-                for oid in json.loads(payment['order_ids']):
-                    c.execute("UPDATE orders SET status='Оплачен' WHERE id=?", (int(oid),))
-                c.execute("UPDATE star_payments SET status='paid' WHERE payload=?", (payload,))
-        return {'ok': True}
-    text = (message.get('text') or '').strip()
-    chat = message.get('chat') or {}
-    chat_id = chat.get('id')
-    if chat_id and text.split(' ', 1)[0].split('@', 1)[0] == '/start':
-        try:
-            telegram_api('sendMessage', {
-                'chat_id': chat_id,
-                'text': '👑 Добро пожаловать в CrownStore!\n\n🛍 Здесь ты найдёшь цифровые товары по отличным ценам.\n\n⚡ Выбирай товар, оформляй заказ и оплачивай прямо в Telegram!\n\n👇 Нажимай кнопку ниже, чтобы перейти в магазин.',
-                'reply_markup': {
-                    'inline_keyboard': [[{
-                        'text': 'Открыть магазин',
-                        'web_app': {'url': f'{PUBLIC_URL}/miniapp'}
-                    }]]
-                }
-            })
-        except Exception:
-            app.logger.exception('Could not send Telegram welcome message.')
-    return {'ok': True}
-
+            payment=c.execute("SELECT * FROM ruble_payments WHERE telegram_user_id=? AND status='Ожидает оплаты' ORDER BY id DESC LIMIT 1",(user_id,)).fetchone()
+            if payment:
+                c.execute("UPDATE ruble_payments SET receipt_file_id=?,status='Чек получен' WHERE id=?",(photos[-1]['file_id'],payment['id']))
+                ids=[int(x) for x in json.loads(payment['order_ids'])]
+                details=c.execute('SELECT o.id,o.quantity,p.name FROM orders o LEFT JOIN products p ON p.id=o.product_id WHERE o.id IN (%s)' % ','.join('?'*len(ids)),ids).fetchall()
+            else: details=[]
+        if payment:
+            if ADMIN_TELEGRAM_ID:
+                caption=f"🧾 Чек на проверку\nЗаказ: {payment['payment_ref']}\nСумма: {payment['total_cents']/100:.2f} ₽\nПокупатель ID: {user_id}\n"+'\n'.join(f"• {x['name']} × {x['quantity']} (№{x['id']})" for x in details)
+                sent=telegram_api('sendPhoto', {'chat_id':int(ADMIN_TELEGRAM_ID),'photo':photos[-1]['file_id'],'caption':caption,'reply_markup':{'inline_keyboard':[[{'text':'✅ Подтвердить и выдать ключ','callback_data':f"rubok:{payment['id']}"},{'text':'❌ Отклонить','callback_data':f"rubno:{payment['id']}"}]]}})
+                if not sent or not sent.get('ok'): app.logger.error('Could not forward receipt to admin')
+            else: app.logger.error('ADMIN_TELEGRAM_ID is not configured')
+            telegram_api('sendMessage', {'chat_id':chat_id,'text':'✅ Чек получен и отправлен продавцу на проверку. Ожидай подтверждения.' if ADMIN_TELEGRAM_ID else 'Чек получен, но магазин ещё не настроен для уведомлений продавца.'})
+        else: telegram_api('sendMessage', {'chat_id':chat_id,'text':'Сначала выбери товар через /catalog, затем отправь чек.'})
+        return {'ok':True}
+    if chat_id: telegram_api('sendMessage', {'chat_id':chat_id,'text':'Используй /catalog, чтобы открыть каталог товаров.'})
+    return {'ok':True}
 @app.route('/')
 def index():
     with db() as c: products=c.execute('SELECT * FROM products WHERE active=1 ORDER BY id DESC').fetchall()
