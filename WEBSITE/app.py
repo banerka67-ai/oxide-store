@@ -423,16 +423,46 @@ def update_product_physical(pid):
 @app.route('/admin/ruble-payment/<int:payment_id>/confirm', methods=['POST'])
 @admin_required
 def confirm_ruble_payment(payment_id):
+    buyer_id = None
+    order_lines = []
+    newly_confirmed = False
     with db() as c:
         payment = c.execute('SELECT * FROM ruble_payments WHERE id=?', (payment_id,)).fetchone()
         if not payment:
             abort(404)
         if payment['status'] != 'Оплачен':
             ids = [int(x) for x in json.loads(payment['order_ids'])]
+            buyer_id = int(payment['telegram_user_id'])
             for oid in ids:
+                order = c.execute(
+                    """SELECT o.id, o.quantity, p.name
+                       FROM orders o LEFT JOIN products p ON p.id=o.product_id
+                       WHERE o.id=?""",
+                    (oid,)
+                ).fetchone()
+                if order:
+                    order_lines.append(f"• {order['name'] or 'Товар'} × {order['quantity']} (заказ №{order['id']})")
                 c.execute("UPDATE orders SET status='Оплачен' WHERE id=? AND status='Ожидает оплаты'", (oid,))
             c.execute("UPDATE ruble_payments SET status='Оплачен' WHERE id=?", (payment_id,))
-    flash('Платёж отмечен оплаченным. Перед подтверждением проверь поступление денег в банке.')
+            newly_confirmed = True
+
+    if newly_confirmed:
+        message = (
+            '👑 CrownStore\n\n'
+            '✅ Оплата получена! Твой заказ принят в обработку.\n\n'
+            + '\n'.join(order_lines)
+            + '\n\nМы свяжемся с тобой по указанному контакту для передачи товара.'
+        )
+        try:
+            result = telegram_api('sendMessage', {'chat_id': buyer_id, 'text': message})
+            if not result or not result.get('ok'):
+                raise RuntimeError('Telegram sendMessage failed')
+        except Exception:
+            app.logger.exception('Payment confirmed, but could not notify the physical-goods buyer.')
+            flash('Оплата подтверждена, но сообщение покупателю не отправилось. Свяжись с ним вручную.')
+            return redirect(url_for('miniapp_admin'))
+
+    flash('Оплата подтверждена, покупателю отправлено сообщение. Перед подтверждением проверь поступление денег в банке.')
     return redirect(url_for('miniapp_admin'))
 
 
