@@ -56,7 +56,8 @@ function add(id, name, price) {
     return;
   }
   const card = document.querySelector('[data-product=\"' + id + '\"]');
-  const physical = !!(card && Number(card.dataset.physical) === 1);\n  const item = cart.get(id) || { name: String(name), price, qty: 0, physical };
+  const physical = !!(card && Number(card.dataset.physical) === 1);
+  const item = cart.get(id) || { name: String(name), price, qty: 0, physical };
   item.qty += 1;
   cart.set(id, item);
   const count = [...cart.values()].reduce((sum, x) => sum + x.qty, 0);
